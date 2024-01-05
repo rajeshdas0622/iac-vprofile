@@ -1,0 +1,85 @@
+name: "Vprofile-EKS-Project"
+on:
+  push:
+    branches:
+      - main
+      - stage
+    paths:
+      - terraform/**
+  pull_request:
+    branches:
+      - main
+    paths:
+      - terraform/**
+env:
+    #AWS Access key & Secret key
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    # S3 Bucket Used for Backend state
+  BUCKET_TF_STATE: ${{ secrets.BUCKET_TF_STATE }}
+    # Region and EKS Cluster Name
+  AWS_REGION: us-east-1
+  EKS_CLUSTER: vpro-eks-cluster
+jobs:
+  terraform:
+    name: Apply terraform code changes
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: ./terraform
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+            
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
+
+      - name: Terraform init
+        id: init
+        run: terraform init -backend-config="bucket=$BUCKET_TF_STATE"
+
+      - name: Terraform fmt
+        id: fmt
+        run: terraform fmt -check
+            
+      - name: Terraform validate
+        id: validate
+        run: terraform validate 
+
+      - name: terraform plan
+        id: plan
+        run: terraform plan -no-color -input=false -out=planfile
+        continue-on-error: false
+
+      - name: terraform plan status
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+      
+      - name: terraform apply
+        id: apple
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: terraform apply --auto-approve -input=false -parallelism-1 planfile
+
+      - name: Configure AWS CLI
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+    
+      - name: Set up Helm
+        uses: azure/setup-helm@v3
+
+      - name: get kube-config file
+        id: getconfig
+        if: steps.apple.outcome == 'success'
+        run: aws eks update-kubeconfig --region ${{env.AWS_REGION}} --name ${{env.EKS_CLUSTER}}
+      
+      - name: installing nginx ingress controller on EKS Cluster
+        id: nginx
+        if: steps.apple.outcome == 'success' && steps.getconfig.outcome == 'success'
+        run: |
+          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+          helm repo update
+          helm install ingress-nginx ingress-nginx/ingress-nginx
